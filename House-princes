@@ -1,0 +1,111 @@
+# %%
+#导入所需包
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
+
+# 加载数据
+train_data = pd.read_csv('/opt/homebrew/Caskroom/miniforge/base/envs/kaggle/dataset/house-prices-advanced-regression-techniques/train.csv')
+test_data = pd.read_csv('/opt/homebrew/Caskroom/miniforge/base/envs/kaggle/dataset/house-prices-advanced-regression-techniques/test.csv')
+
+#查看缺失值
+missing_values = train_data.isnull().sum()
+missing_values = missing_values[missing_values > 0]
+print(missing_values.head(10))
+
+missing_features = missing_values.index.tolist()
+print("\n missing_values（前10项）:", missing_features[:10])
+
+
+# %% [markdown]
+# mask = missing_values > 0  # 生成布尔掩码
+# Id               False
+# MSSubClass       False
+# LotFrontage       True
+# Alley            True
+# ...              ...
+# SalePrice        False
+# dtype: bool
+
+# %%
+
+# 准备数据（先简单填充缺失值）
+X = train_data.drop("SalePrice", axis=1).select_dtypes(include=[np.number]).fillna(0)
+y = train_data["SalePrice"]
+
+# 训练模型并提取特征重要性
+model = RandomForestRegressor(random_state=42)
+model.fit(X, y)
+importance_features = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
+print(importance_features.head(10))
+
+importance_features = importance_features.index.tolist()
+print("\n importance_features（前10项）:", importance_features[:10])
+
+
+# %%
+# 找出重要特征中同时存在缺失值的列
+features_to_fill = list(set(importance_features) & set(missing_features))
+print("需要填充的重要特征：", features_to_fill)
+
+# %% [markdown]
+# set(important_features) 和 set(missing_features)
+# 将列表转换为集合（自动去重）
+# 
+# set1 & set2
+# 用 & 运算符取两个集合的交集：
+# 
+# list(...)
+# 将结果转回列表格式：
+# 
+# 
+
+# %%
+# 用房屋的建造年份（YearBuilt）填充
+train_data['GarageYrBlt'].fillna(train_data['YearBuilt'], inplace=True)
+print(train_data[train_data['GarageYrBlt'] == train_data['YearBuilt']].shape[0])
+
+# 按邻居分组（Neighborhood）用中位数填充
+train_data['LotFrontage'] = train_data.groupby('Neighborhood')['LotFrontage'].transform(
+    lambda x: x.fillna(x.median())
+)
+
+# 填充为0（表示无砖石饰面）
+train_data['MasVnrArea'].fillna(0, inplace=True)
+
+# 同时填充对应的类型列（MasVnrType）
+train_data['MasVnrType'].fillna('None', inplace=True)
+
+print(train_data[['GarageYrBlt', 'LotFrontage', 'MasVnrArea']].isnull().sum())
+
+
+
+# %%
+#select features
+features = ['OverallQual', 'GrLivArea', 'GarageCars', 'TotalBsmtSF', 'FullBath', 'YearBuilt']
+X = train_data[features]
+y = np.log(train_data['SalePrice'])  # 对价格取对数
+
+# %%
+# 划分训练集和验证集
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+
+# %%
+# 创建并训练模型
+model = LinearRegression()
+model.fit(X_train, y_train)
+
+# 在验证集上评估
+val_predictions = model.predict(X_val)
+val_rmse = np.sqrt(mean_squared_error(y_val, val_predictions))
+print(f'Validation RMSE: {val_rmse:.4f}')
+
+# 可视化预测结果
+plt.scatter(y_val, val_predictions)
+plt.xlabel('True Values (log scale)')
+plt.ylabel('Predictions (log scale)')
+plt.title('Linear Regression Predictions')
+plt.plot([y.min(), y.max()], [y.min(), y.max()], 'k--')
+plt.show()
+
+
