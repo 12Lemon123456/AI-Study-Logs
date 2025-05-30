@@ -1,0 +1,600 @@
+# %%
+"""
+手写cnn结构
+cnn基础, 可视化特征图实现
+数据增强(CIFAR-10增强pipeline)
+手动实现 ,风格迁移(VGG19内容-风格损失)
+"""
+
+import numpy as np
+
+class SimpleCNN:
+    def __init__(self):
+        # 初始化卷积核（3x3大小，1个输入通道，2个输出通道）
+        self.conv1_filters = np.random.randn(2, 1, 3, 3) * 0.1
+        
+        # 计算全连接层输入维度
+        # 输入28x28 -> 卷积后26x26 -> 池化后13x13
+        # 2个通道，所以展平后是2 * 13 * 13=338
+        self.fc_input_size = 2 * 13 * 13
+        
+        # 初始化全连接层权重（338输入，10类输出）
+        self.fc_weights = np.random.randn(self.fc_input_size, 10) * 0.1
+        self.fc_bias = np.zeros(10)
+    
+    def conv2d(self, input, filters):
+        """简单2D卷积实现"""
+        n_filters, _, fh, fw = filters.shape
+        h, w = input.shape
+        output = np.zeros((n_filters, h-fh+1, w-fw+1))
+        
+        for i in range(n_filters):
+            for y in range(h-fh+1):
+                for x in range(w-fw+1):
+                    output[i, y, x] = np.sum(input[y:y+fh, x:x+fw] * filters[i, 0])
+        
+        return output
+    
+    def max_pool2d(self, input, pool_size=2):
+        """最大池化实现"""
+        n, h, w = input.shape
+        new_h = h // pool_size
+        new_w = w // pool_size
+        output = np.zeros((n, new_h, new_w))
+        
+        for i in range(n):
+            for y in range(new_h):
+                for x in range(new_w):
+                    y_start = y * pool_size
+                    y_end = y_start + pool_size
+                    x_start = x * pool_size
+                    x_end = x_start + pool_size
+                    output[i, y, x] = np.max(input[i, y_start:y_end, x_start:x_end])
+        
+        return output
+    
+    def relu(self, x):
+        """ReLU激活函数"""
+        return np.maximum(0, x)
+    
+    def softmax(self, x):
+        """Softmax函数"""
+        exp_x = np.exp(x - np.max(x))  # 防止数值溢出
+        return exp_x / exp_x.sum()
+    
+    def forward(self, x):
+        """前向传播"""
+        # 假设输入x是28x28的灰度图像
+        x = x.reshape(28, 28)
+        
+        # 卷积层1
+        conv1 = self.conv2d(x, self.conv1_filters)
+        
+        # ReLU激活
+        conv1_relu = self.relu(conv1)
+        
+        # 最大池化
+        pool1 = self.max_pool2d(conv1_relu)
+        
+        # 展平
+        flattened = pool1.flatten()
+        
+        # 全连接层
+        fc_output = np.dot(flattened, self.fc_weights) + self.fc_bias
+        
+        # Softmax输出
+        output = self.softmax(fc_output)
+        
+        return output
+
+# 使用示例
+if __name__ == "__main__":
+    # 创建一个简单的CNN
+    cnn = SimpleCNN()
+    
+    # 创建一个随机输入图像（28x28）
+    input_image = np.random.rand(28, 28)
+    
+    # 前向传播
+    output = cnn.forward(input_image)
+    
+    print("输出概率:", output)
+    print("预测类别:", np.argmax(output))
+
+# %%
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+from torchvision import models
+from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+import ssl  # For SSL certificate fix
+
+# ===== 1. SSL CERTIFICATE FIX =====
+ssl._create_default_https_context = ssl._create_unverified_context  # Temporary workaround
+
+
+# ===== 2. MODEL DEFINITION =====
+class SimpleCNN(nn.Module):
+    def __init__(self):
+        super(SimpleCNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.fc1 = nn.Linear(32 * 7 * 7, 10)
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = x.view(-1, 32 * 7 * 7)
+        x = self.fc1(x)
+        return x
+
+# ===== 3. MODEL SELECTION =====
+use_pretrained = False  # Set to True for VGG16 (with fixes below)
+
+if use_pretrained:
+    # Load VGG16 with updated weights parameter
+    model = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features
+    # Convert grayscale to 3-channel for VGG16 compatibility
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.Grayscale(num_output_channels=3),  # Critical fix!
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+else:
+    model = SimpleCNN()
+    transform = transforms.Compose([
+        transforms.Resize((28, 28)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
+
+# ===== 4. HOOK AND VISUALIZATION =====
+feature_maps = []
+
+def hook(module, input, output):
+    feature_maps.append(output)
+
+# Register hook based on model type
+if use_pretrained:
+    model[3].register_forward_hook(hook)  # VGG16's 3rd conv layer
+else:
+    model.conv1.register_forward_hook(hook)  # SimpleCNN's first conv
+
+# ===== 5. IMAGE PROCESSING =====
+def preprocess_image(image_path):
+    image = Image.open(image_path).convert('L')  # Force grayscale
+    return transform(image).unsqueeze(0)
+
+
+# 5. 加载图像并获取特征图
+image_path = '/Users/yangzi/Downloads/cat.jpg'  # 替换为你的图像路径
+input_image = preprocess_image(image_path)
+
+# 前向传播（这会触发hook函数）
+with torch.no_grad():
+    model(input_image)
+
+# ===== 6. EXECUTION =====
+image_path = '/Users/yangzi/Downloads/cat.jpg'
+input_image = preprocess_image(image_path)
+
+with torch.no_grad():
+    model(input_image)
+
+def visualize_feature_maps(feature_maps, num_maps=16):
+    layer_features = feature_maps[0][0]
+    num_channels = min(layer_features.shape[0], num_maps)
+    
+    plt.figure(figsize=(10, 2*(num_channels//4 + 1)))
+    for i in range(num_channels):
+        plt.subplot((num_channels//4) + 1, 4, i+1)
+        plt.imshow(layer_features[i].cpu().numpy(), cmap='viridis')
+        plt.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+visualize_feature_maps(feature_maps)
+
+# %%
+import numpy as np
+from PIL import Image
+import cv2
+import random
+import os
+
+class CIFAR10Augmentor:
+    def __init__(self, flip_prob=0.5, crop_scale=(0.8, 1.0), 
+                 color_jitter_params=(0.1, 0.1, 0.1), rotation_angle=15):
+        """
+        初始化数据增强参数
+        
+        参数:
+            flip_prob: 水平翻转概率
+            crop_scale: 随机裁剪比例范围 (min, max)
+            color_jitter_params: (亮度, 对比度, 饱和度) 的抖动幅度
+            rotation_angle: 最大旋转角度 (度)
+        """
+        self.flip_prob = flip_prob
+        self.crop_scale = crop_scale
+        self.color_jitter_params = color_jitter_params
+        self.rotation_angle = rotation_angle
+    
+    def random_flip(self, img):
+        """随机水平翻转"""
+        if random.random() < self.flip_prob:
+            return img[:, ::-1, :]  # 水平翻转
+        return img
+    
+    def random_crop(self, img):
+        """随机裁剪"""
+        h, w = img.shape[:2]
+        scale = random.uniform(*self.crop_scale)
+        new_h, new_w = int(h * scale), int(w * scale)
+        
+        # 确保裁剪不会超出边界
+        y = random.randint(0, h - new_h)
+        x = random.randint(0, w - new_w)
+        
+        cropped = img[y:y+new_h, x:x+new_w]
+        # 使用双线性插值调整回原始尺寸
+        return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+    
+    def color_jitter(self, img):
+        """颜色抖动"""
+        brightness, contrast, saturation = self.color_jitter_params
+        
+        # 亮度调整
+        if brightness > 0:
+            delta = random.uniform(-brightness, brightness)
+            img = img + delta
+            img = np.clip(img, 0, 255)
+        
+        # 对比度调整
+        if contrast > 0:
+            alpha = random.uniform(1 - contrast, 1 + contrast)
+            img = alpha * (img - 127.5) + 127.5
+            img = np.clip(img, 0, 255)
+        
+        # 饱和度调整 (转换为HSV空间)
+        if saturation > 0:
+            img_hsv = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_RGB2HSV)
+            delta = random.uniform(-saturation, saturation)
+            img_hsv[:, :, 1] = np.clip(img_hsv[:, :, 1] + delta * 255, 0, 255)
+            img = cv2.cvtColor(img_hsv, cv2.COLOR_HSV2RGB)
+        
+        return img
+    
+    def random_rotation(self, img):
+        """随机旋转"""
+        angle = random.uniform(-self.rotation_angle, self.rotation_angle)
+        h, w = img.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR)
+        return rotated
+    
+    def add_gaussian_noise(self, img, mean=0, std=5):
+        """添加高斯噪声"""
+        noise = np.random.normal(mean, std, img.shape)
+        noisy_img = img + noise
+        return np.clip(noisy_img, 0, 255)
+    
+    def augment(self, img):
+        """应用所有增强"""
+        # 确保输入是numpy数组
+        if isinstance(img, Image.Image):
+            img = np.array(img)
+        
+        # 转换为RGB格式 (如果是BGR)
+        if img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # 应用各种增强
+        img = self.random_flip(img)
+        img = self.random_crop(img)
+        img = self.color_jitter(img)
+        img = self.random_rotation(img)
+        img = self.add_gaussian_noise(img)
+        
+        return img.astype(np.uint8)
+
+# 示例使用
+if __name__ == "__main__":
+    # 创建增强器实例
+    augmentor = CIFAR10Augmentor(
+        flip_prob=0.5,
+        crop_scale=(0.8, 1.0),
+        color_jitter_params=(0.1, 0.2, 0.1),
+        rotation_angle=15
+    )
+    
+    # 假设我们有一个CIFAR-10图像 (32x32 RGB)
+    # 这里我们创建一个随机图像作为示例
+    original_img = np.random.randint(0, 255, (32, 32, 3), dtype=np.uint8)
+    
+    # 应用增强
+    augmented_img = augmentor.augment(original_img)
+    
+    # 显示结果 (需要matplotlib)
+    import matplotlib.pyplot as plt
+    
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.title("Original Image")
+    plt.imshow(original_img)
+    
+    plt.subplot(1, 2, 2)
+    plt.title("Augmented Image")
+    plt.imshow(augmented_img)
+    plt.show()
+
+# %%
+from torchvision.models.resnet import BasicBlock
+
+class ResNet(nn.Module):
+    def __init__(self, block, layers, num_classes=10):
+        """
+        使用 BasicBlock 构建 ResNet
+        
+        参数:
+            block: 残差块类型 (BasicBlock)
+            layers: 每个阶段的块数量列表
+            num_classes: 分类类别数
+        """
+        super(ResNet, self).__init__()
+        self.in_channels = 64
+        
+        # 初始卷积层
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        
+        # 四个残差阶段
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+        
+        # 分类头
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
+    
+    def _make_layer(self, block, out_channels, blocks, stride=1):
+        """构建一个残差阶段"""
+        downsample = None
+        
+        # 如果需要下采样 (维度不匹配时)
+        if stride != 1 or self.in_channels != out_channels * block.expansion:
+            downsample = nn.Sequential(
+                nn.Conv2d(
+                    self.in_channels,
+                    out_channels * block.expansion,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False
+                ),
+                nn.BatchNorm2d(out_channels * block.expansion),
+            )
+        
+        layers = []
+        layers.append(block(self.in_channels, out_channels, stride, downsample))
+        self.in_channels = out_channels * block.expansion
+        
+        for _ in range(1, blocks):
+            layers.append(block(self.in_channels, out_channels))
+        
+        return nn.Sequential(*layers)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        
+        return x
+
+# 创建 ResNet-18 模型示例
+def resnet18(num_classes=10):
+    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+
+# 示例使用
+if __name__ == "__main__":
+    # 创建模型
+    model = resnet18(num_classes=10)
+    
+    # 打印模型结构
+    print(model)
+    
+    # 测试前向传播
+    x = torch.randn(1, 3, 224, 224)  # 假设输入为224x224 RGB图像
+    output = model(x)
+    print("Output shape:", output.shape)
+
+# %%
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torchvision import transforms, models
+from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+
+# 设备配置
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 图像加载和预处理
+def load_image(image_path, max_size=None, shape=None):
+    """加载并预处理图像"""
+    image = Image.open(image_path).convert('RGB')
+    
+    if max_size is not None:
+        # 调整图像大小，保持长宽比
+        size = min(max_size, max(image.size))
+        img_transforms = transforms.Compose([
+            transforms.Resize(size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+        ])
+    else:
+        img_transforms = transforms.Compose([
+            transforms.Resize(shape),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+        ])
+    
+    # 添加批次维度
+    image = img_transforms(image).unsqueeze(0)
+    return image.to(device)
+
+# 图像反标准化并转换为PIL图像
+def im_convert(tensor):
+    """将张量转换为图像"""
+    image = tensor.to("cpu").clone().detach()
+    image = image.numpy().squeeze()
+    image = image.transpose(1, 2, 0)
+    image = image * np.array((0.229, 0.224, 0.225)) + np.array((0.485, 0.456, 0.406))
+    image = image.clip(0, 1)
+    return image
+
+# 获取特征提取器
+def get_features(image, model, layers=None):
+    """从指定层提取特征"""
+    if layers is None:
+        layers = {
+            '0': 'conv1_1',
+            '5': 'conv2_1',
+            '10': 'conv3_1',
+            '19': 'conv4_1',
+            '21': 'conv4_2',  # 内容表示
+            '28': 'conv5_1'
+        }
+    
+    features = {}
+    x = image
+    for name, layer in model._modules.items():
+        x = layer(x)
+        if name in layers:
+            features[layers[name]] = x
+    
+    return features
+
+# 计算Gram矩阵
+def gram_matrix(tensor):
+    """计算Gram矩阵"""
+    _, d, h, w = tensor.size()
+    tensor = tensor.view(d, h * w)
+    gram = torch.mm(tensor, tensor.t())
+    return gram
+
+# 风格迁移类
+class StyleTransfer:
+    def __init__(self):
+        # 加载预训练的VGG19模型
+        self.vgg = models.vgg19(pretrained=True).features
+        # 冻结所有参数
+        for param in self.vgg.parameters():
+            param.requires_grad_(False)
+        self.vgg.to(device)
+        
+        # 内容层和风格层
+        self.content_layers = ['conv4_2']
+        self.style_layers = ['conv1_1', 'conv2_1', 'conv3_1', 'conv4_1', 'conv5_1']
+        
+        # 损失权重
+        self.content_weight = 1
+        self.style_weight = 1e6
+        
+    def transfer(self, content_path, style_path, steps=2000, 
+                 learning_rate=0.003, show_every=400):
+        """执行风格迁移"""
+        # 加载内容图像和风格图像
+        content = load_image(content_path, max_size=400)
+        style = load_image(style_path, shape=content.shape[-2:])
+        
+        # 初始化目标图像（从内容图像开始）
+        target = content.clone().requires_grad_(True)
+        
+        # 获取内容和风格特征
+        content_features = get_features(content, self.vgg)
+        style_features = get_features(style, self.vgg)
+        
+        # 计算风格特征的Gram矩阵
+        style_grams = {layer: gram_matrix(style_features[layer]) 
+                       for layer in style_features}
+        
+        # 优化器
+        optimizer = optim.Adam([target], lr=learning_rate)
+        
+        # 训练循环
+        for step in range(1, steps+1):
+            # 获取目标图像的特征
+            target_features = get_features(target, self.vgg)
+            
+            # 计算内容损失
+            content_loss = 0
+            for layer in self.content_layers:
+                content_loss += F.mse_loss(target_features[layer], 
+                                         content_features[layer])
+            
+            # 计算风格损失
+            style_loss = 0
+            for layer in self.style_layers:
+                target_feature = target_features[layer]
+                target_gram = gram_matrix(target_feature)
+                style_gram = style_grams[layer]
+                style_loss += F.mse_loss(target_gram, style_gram)
+            
+            # 总损失
+            total_loss = self.content_weight * content_loss + \
+                         self.style_weight * style_loss
+            
+            # 反向传播和优化
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+            
+            # 显示中间结果
+            if step % show_every == 0:
+                print(f"Step {step}/{steps}, Total loss: {total_loss.item():.4f}")
+                plt.imshow(im_convert(target))
+                plt.axis('off')
+                plt.show()
+        
+        # 返回最终结果
+        return target
+
+# 使用示例
+if __name__ == "__main__":
+    st = StyleTransfer()
+    content_path = "/Users/yangzi/Downloads/cat.jpg"  # 替换为你的内容图像路径
+    style_path = "/Users/yangzi/Downloads/hall.jpg"    # 替换为你的风格图像路径
+    
+    # 执行风格迁移
+    result = st.transfer(content_path, style_path, steps=2000)
+    
+    # 显示最终结果
+    final_image = im_convert(result)
+    plt.figure(figsize=(10, 10))
+    plt.imshow(final_image)
+    plt.axis('off')
+    plt.show()
+
+
